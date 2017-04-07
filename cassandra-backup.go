@@ -67,23 +67,27 @@ func main() {
 
 	switch args[0] {
 	case "single":
-		doBackup()
+		msgIfErr(doBackup())
 	case "start":
-		seconds := 10
+		seconds := 86400
 		if len(args) > 1 {
-			if s, err := strconv.Atoi(args[1]); err != nil {
+			if s, err := strconv.Atoi(args[1]); err == nil {
 				seconds = s
 			}
 		}
+		if err := msgIfErr(doBackup()); err != nil {
+			log.Fatalf("Initial backup error, job will not repeat: %s", err)
+			os.Exit(2)
+		}
 		for _ = range time.NewTicker(time.Duration(seconds) * time.Second).C {
-			doBackup()
+			msgIfErr(doBackup())
 		}
 	case "restore":
 		snapshot := ""
 		if len(args) > 1 {
 			snapshot = args[1]
 		}
-		doRestore(snapshot)
+		msgIfErr(doRestore(snapshot))
 	default:
 		usage()
 	}
@@ -95,18 +99,25 @@ func usage() {
 	os.Exit(2)
 }
 
+func msgIfErr(err error) error {
+	if err != nil {
+		log.Println("Error: ", err)
+	}
+	return err
+}
+
 func doBackup() error {
 
 	snapshot, err := cassandraMakeSnapshot()
 	if err != nil {
-		log.Println("Snapshot error", err)
+		err = errors.New("Snapshot error: " + err.Error())
 		return err
 	}
 	snapshotId := strconv.Itoa(snapshot)
 
 	backupDir := pathSeparator + backupPrefix + snapshotId
 	if _, err := exec.Command("mkdir", backupDir).Output(); err != nil {
-		log.Println("Create backup dir error", err)
+		err = errors.New("Create backup dir error: " + err.Error())
 		return err
 	}
 
@@ -126,7 +137,7 @@ func doBackup() error {
 					pathSeparator + "snapshots"
 				if len(u) == 0 {
 					if r, err := exec.Command("stat", "-c", "%U %G", snapshotDir).Output(); err != nil {
-						log.Println("Unable to get owner and group", err)
+						err = errors.New("Unable to get owner and group: " + err.Error())
 						return err
 					} else {
 						ug := strings.Split(strings.TrimSpace(string(r)), " ")
@@ -135,16 +146,14 @@ func doBackup() error {
 				}
 				info, err := os.Stat(snapshotDir + pathSeparator + snapshotId)
 				if err != nil || !info.IsDir() {
-					log.Println("No info ", snapshotDir+pathSeparator+snapshotId, err)
 					continue
 				}
 				if _, err := exec.Command("mkdir", "-p", backupDir+snapshotDir).Output(); err != nil {
-					log.Println("Create snapshot dir error", err)
+					err = errors.New("Create snapshot dir error: " + err.Error())
 					return err
 				}
-				//return nil
 				if _, err := exec.Command("mv", snapshotDir+pathSeparator+snapshotId, backupDir+snapshotDir).Output(); err != nil {
-					log.Println("Move snapshot dir error", err)
+					err = errors.New("Move snapshot dir error: " + err.Error())
 					return err
 				}
 			}
@@ -152,22 +161,22 @@ func doBackup() error {
 
 	}
 	if _, err := exec.Command("chown", "-R", u+":"+g, backupDir).Output(); err != nil {
-		log.Println("Chown snapshot dir error", err)
+		err = errors.New("Chown snapshot dir error: " + err.Error())
 		return err
 	}
 
 	if _, err := exec.Command("tar", "-cvzf", backupDir+extTarGz, "-C", backupDir, ".").Output(); err != nil {
-		log.Println("Compress backup error", err)
+		err = errors.New("Compress backup error: " + err.Error())
 		return err
 	}
 
 	if _, err := exec.Command("rm", "-R", backupDir).Output(); err != nil {
-		log.Println("Remove backup dir error", err)
+		err = errors.New("Remove backup dir error: " + err.Error())
 		return err
 	}
 
 	if err = awsFileToBucket(backupDir+extTarGz, backupDir+extTarGz); err != nil {
-		log.Println("Send snapshot to storage error", err)
+		err = errors.New("Send snapshot to storage error: " + err.Error())
 		return err
 	}
 
@@ -181,17 +190,16 @@ func doRestore(snapshotId string) (err error) {
 	var snapshot int
 	if len(snapshotId) > 0 {
 		if snapshot, err = strconv.Atoi(snapshotId); err != nil {
-			err = errors.New("snapshot should be int")
+			err = errors.New("Snapshot should be int: " + err.Error())
 			return
 		}
 	}
 	snapshots, err := awsSnapshotsList()
 	if err != nil {
-		log.Println("Error read backups", err)
 		return
 	}
 	if len(snapshots) == 0 {
-		err = errors.New("Empty backups list")
+		err = errors.New("Empty backuped snapshots: " + err.Error())
 		return
 	}
 
@@ -204,7 +212,7 @@ func doRestore(snapshotId string) (err error) {
 			}
 		}
 		if !found {
-			err = errors.New("Specified backup is absent")
+			err = errors.New("Specified backuped snapshots is absent")
 			return
 		}
 	} else {
@@ -219,25 +227,25 @@ func doRestore(snapshotId string) (err error) {
 
 	var backupFile string
 	if backupFile, err = awsFileFromBucket(pathSeparator + backupPrefix + strconv.Itoa(snapshot) + extTarGz); err != nil {
-		log.Println("Get backup file error", err)
+		err = errors.New("Get backuped snapshot error: " + err.Error())
 		return
 	}
 
 	info, err := os.Stat(backupFile)
-	if err != nil || info.IsDir() {
-		log.Println("Read backup file error", err)
+	if err != nil {
+		err = errors.New("Read backuped snapshot error: " + err.Error())
 		return
 	} else if info.IsDir() {
-		err = errors.New("backup is dir")
+		err = errors.New("Backuped snapshot is dir, not file")
 		return
 	}
 
 	if _, err = exec.Command("tar", "-zxvf", backupFile, "-C", pathSeparator).Output(); err != nil {
-		log.Println("Decompress backup error", err)
+		err = errors.New("Decompress backup error: " + err.Error())
 		return
 	}
 	if _, err = exec.Command("rm", "-dr", backupFile).Output(); err != nil {
-		log.Println("Delete snapshot file error", err)
+		err = errors.New("Delete snapshot file error: " + err.Error())
 		return
 	}
 
@@ -264,7 +272,7 @@ func doRestore(snapshotId string) (err error) {
 					toDelete := dir1 + pathSeparator + dir2.Name() + pathSeparator + dir3.Name() +
 						pathSeparator + entry.Name()
 					if err = os.Remove(toDelete); err != nil {
-						log.Println("File delete error", err)
+						err = errors.New("File " + toDelete + " delete error: " + err.Error())
 						return
 					}
 				}
@@ -273,23 +281,21 @@ func doRestore(snapshotId string) (err error) {
 				snapshotDir := currentDir + pathSeparator + "snapshots" + pathSeparator + snapshotId
 				info, err = os.Stat(snapshotDir)
 				if err != nil {
-					log.Println("No snapshot dir", err)
 					continue
 				}
 				if !info.IsDir() {
-					log.Println("Snapshot is not dir")
 					continue
 				}
 				// exec.Command not works with stars:
 				// http://stackoverflow.com/questions/31467153/golang-failed-exec-command-that-works-in-terminal
 				//if _, err := exec.Command("mv", snapshotDir+pathSeparator+"*", currentDir).Output(); err != nil {
 				if _, err = exec.Command("/bin/sh", "-c", "mv "+snapshotDir+pathSeparator+"* "+currentDir).Output(); err != nil {
-					log.Println("Move data from snapshot dir error", err)
+					err = errors.New("Move data from snapshot dir error: " + err.Error())
 					return
 				}
 
 				if _, err = exec.Command("rm", "-dr", snapshotDir).Output(); err != nil {
-					log.Println("Delete snapshot dir error", err)
+					err = errors.New("Delete snapshot dir error: " + err.Error())
 					return
 				}
 			}
@@ -370,6 +376,10 @@ func awsSnapshotsList() (snapshots []int, err error) {
 	if err != nil {
 		return
 	}
+	if len(r) == 0 {
+		err = errors.New("No snapshots stored on S3")
+		return
+	}
 	type contentsItem struct {
 		Key string
 	}
@@ -380,7 +390,7 @@ func awsSnapshotsList() (snapshots []int, err error) {
 	var contents []contentsItem
 	var ok bool
 	if contents, ok = data["Contents"]; !ok {
-		err = errors.New("Invalid data")
+		err = errors.New("Invalid data from S3")
 		return
 	}
 	for _, c := range contents {
